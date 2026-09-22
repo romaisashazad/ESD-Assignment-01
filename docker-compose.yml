@@ -14,7 +14,7 @@ services:
     ports:
       - "9090:9090"
     restart: unless-stopped
-    
+
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
@@ -24,4 +24,11 @@ services:
       - "3001:3000"
     depends_on:
       - prometheus
+    restart: unless-stopped
+  
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    ports:
+      - "9100:9100"
     restart: unless-stopped
