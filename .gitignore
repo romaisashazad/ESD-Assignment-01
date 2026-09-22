@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+*.log
+.DS_Store
+node_modules/
+*.egg-info/
+dist/
+build/
+
+# Data volumes / local state (don't commit stack data)
+esdata/
+grafana-data/
