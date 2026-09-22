@@ -1,0 +1,24 @@
+filebeat.inputs:
+  - type: container
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    processors:
+      - add_docker_metadata:
+          host: "unix:///var/run/docker.sock"
+      - decode_json_fields:
+          fields: ["message"]
+          target: ""
+          overwrite_keys: true
+      - drop_event:
+          when:
+            not:
+              equals:
+                container.name: "qr-service"
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "qr-service-logs-%{+yyyy.MM.dd}"
+
+setup.template.name: "qr-service-logs"
+setup.template.pattern: "qr-service-logs-*"
+setup.ilm.enabled: false

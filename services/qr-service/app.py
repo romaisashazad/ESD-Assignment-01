@@ -2,39 +2,54 @@ from flask import Flask, request, send_file, jsonify, Response
 import qrcode
 import io
 import time
+import json
+import logging
+import sys
 from prometheus_client import Counter, Gauge, Histogram, Summary, generate_latest, CONTENT_TYPE_LATEST
 
 app = Flask(__name__)
 
+# --- Structured JSON logger ---
+logger = logging.getLogger("qr-service")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler(sys.stdout)
+logger.addHandler(handler)
+logger.propagate = False
+
+def log_event(level, message, **fields):
+    entry = {
+        "@timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+        "service.name": "qr-service",
+        "log.level": level,
+        "message": message,
+    }
+    entry.update(fields)
+    logger.info(json.dumps(entry))
+
 # --- Metrics ---
 
-# Counter: total QR codes generated (business metric)
 qr_generated_total = Counter(
     "qr_generated_total",
     "Total number of QR codes generated"
 )
 
-# Counter: total failed generation requests (app metric)
 qr_generation_errors_total = Counter(
     "qr_generation_errors_total",
     "Total number of failed QR generation requests",
     ["reason"]
 )
 
-# Gauge: requests currently being processed (app metric)
 qr_in_progress = Gauge(
     "qr_in_progress",
     "Number of QR generation requests currently in progress"
 )
 
-# Histogram: generation duration, with buckets for percentiles (app metric)
 qr_generation_duration_seconds = Histogram(
     "qr_generation_duration_seconds",
     "Time taken to generate a QR code, in seconds",
     buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]
 )
 
-# Summary: average generation duration (Python summary has no percentiles, so used for average only)
 qr_generation_duration_summary = Summary(
     "qr_generation_duration_summary_seconds",
     "Summary of QR code generation duration, in seconds"
@@ -55,9 +70,15 @@ def metrics():
 def generate():
     data = request.get_json(silent=True) or {}
     text = data.get("text")
+    request_id = request.headers.get("X-Request-ID", "n/a")
 
     if not text:
         qr_generation_errors_total.labels(reason="missing_text").inc()
+        log_event(
+            "ERROR", "QR generation failed: missing text field",
+            **{"http.method": "POST", "http.path": "/generate",
+               "http.response.status_code": 400, "request.id": request_id}
+        )
         return jsonify({"error": "Missing 'text' field"}), 400
 
     qr_in_progress.inc()
@@ -74,10 +95,25 @@ def generate():
         qr_generation_duration_summary.observe(duration)
         qr_generated_total.inc()
 
+        log_event(
+            "INFO", "QR code generated successfully",
+            **{"http.method": "POST", "http.path": "/generate",
+               "http.response.status_code": 200,
+               "duration.ms": round(duration * 1000, 2),
+               "request.id": request_id,
+               "text.length": len(text)}
+        )
+
         return send_file(buf, mimetype="image/png")
 
     except Exception as e:
         qr_generation_errors_total.labels(reason="internal_error").inc()
+        log_event(
+            "ERROR", "QR generation failed: internal error",
+            **{"http.method": "POST", "http.path": "/generate",
+               "http.response.status_code": 500,
+               "error.message": str(e), "request.id": request_id}
+        )
         return jsonify({"error": str(e)}), 500
 
     finally:
