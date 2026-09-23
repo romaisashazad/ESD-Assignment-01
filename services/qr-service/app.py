@@ -1,22 +1,30 @@
 from flask import Flask, request, send_file, jsonify, Response, g
-import uuid
 import qrcode
 import io
 import time
 import json
 import logging
 import sys
+import uuid
+import threading
 from prometheus_client import Counter, Gauge, Histogram, Summary, generate_latest, CONTENT_TYPE_LATEST
 
 app = Flask(__name__)
+
+
+# --- Request IDs (Fix 1) ---
+# Use the client's X-Request-ID if it sent one, otherwise generate a new one.
+# The ID is returned in the response header so the client can quote it.
 @app.before_request
 def assign_request_id():
     g.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
 
 @app.after_request
 def return_request_id(resp):
     resp.headers["X-Request-ID"] = g.request_id
     return resp
+
 
 # --- Structured JSON logger ---
 logger = logging.getLogger("qr-service")
@@ -24,7 +32,11 @@ logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 logger.propagate = False
+
+# Fix 2b: silence Werkzeug's plain-text access log (one line per request,
+# including every Prometheus scrape of /metrics). Only real errors are kept.
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
 
 def log_event(level, message, **fields):
     entry = {
@@ -36,11 +48,15 @@ def log_event(level, message, **fields):
     entry.update(fields)
     logger.info(json.dumps(entry))
 
+
 # --- Metrics ---
 
+# Business metric. "kind" has only two possible values (url / text),
+# so it adds just two time series.
 qr_generated_total = Counter(
     "qr_generated_total",
-    "Total number of QR codes generated"
+    "Total number of QR codes generated",
+    ["kind"]
 )
 
 qr_generation_errors_total = Counter(
@@ -64,6 +80,60 @@ qr_generation_duration_summary = Summary(
     "qr_generation_duration_summary_seconds",
     "Summary of QR code generation duration, in seconds"
 )
+
+# Part E: 1 while fault injection is switched on, 0 otherwise.
+# Lets the dashboard show exactly when the fault was active.
+qr_fault_injection_active = Gauge(
+    "qr_fault_injection_active",
+    "1 if the Part E slow-request fault is switched on, else 0"
+)
+
+# Fix 6: create every label combination up front so each series exists at 0.
+# Without this, a series only appears after its first increment, and panels
+# show "No data" instead of 0.
+for k in ("url", "text"):
+    qr_generated_total.labels(kind=k)
+for r in ("missing_text", "internal_error"):
+    qr_generation_errors_total.labels(reason=r)
+
+
+# --- Part E: fault injection ---
+# Switched on and off at runtime through POST /admin/fault, so the container
+# never restarts during the experiment (a restart would reset the counters and
+# add a slow cold start, which would muddy the results).
+# every_n = 0 means off. Local testing only: a real service must never expose
+# an unauthenticated endpoint like this.
+fault = {"every_n": 0, "delay_ms": 0}
+fault_lock = threading.Lock()
+generate_calls = 0
+
+
+@app.route("/admin/fault", methods=["GET", "POST"])
+def admin_fault():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        with fault_lock:
+            fault["every_n"] = max(0, int(data.get("every_n", 0)))
+            fault["delay_ms"] = max(0, int(data.get("delay_ms", 0)))
+            active = fault["every_n"] > 0 and fault["delay_ms"] > 0
+        qr_fault_injection_active.set(1 if active else 0)
+        log_event("WARN" if active else "INFO",
+                  "Fault injection switched " + ("ON" if active else "OFF"),
+                  **{"fault.every_n": fault["every_n"],
+                     "fault.delay_ms": fault["delay_ms"],
+                     "request.id": g.request_id})
+    return jsonify(fault), 200
+
+
+def injected_delay_ms():
+    """Return the delay to add to this request (0 for most requests)."""
+    global generate_calls
+    with fault_lock:
+        generate_calls += 1
+        n, delay = fault["every_n"], fault["delay_ms"]
+        if n > 0 and delay > 0 and generate_calls % n == 0:
+            return delay
+    return 0
 
 
 @app.route("/health", methods=["GET"])
@@ -100,19 +170,31 @@ def generate():
         img.save(buf, format="PNG")
         buf.seek(0)
 
+        # Part E: the delay sits inside the timed section, so it shows up in
+        # the histogram, the summary and the log's duration.ms, just like a
+        # real slowdown would.
+        delay = injected_delay_ms()
+        if delay:
+            time.sleep(delay / 1000)
+
         duration = time.time() - start
         qr_generation_duration_seconds.observe(duration)
         qr_generation_duration_summary.observe(duration)
-        qr_generated_total.inc()
 
-        log_event(
-            "INFO", "QR code generated successfully",
-            **{"http.method": "POST", "http.path": "/generate",
-               "http.response.status_code": 200,
-               "duration.ms": round(duration * 1000, 2),
-               "request.id": request_id,
-               "text.length": len(text)}
-        )
+        kind = "url" if text.lower().startswith(("http://", "https://")) else "text"
+        qr_generated_total.labels(kind=kind).inc()
+
+        # Only the length and kind of the text are logged, never the text itself,
+        # so no user content ends up in the logs.
+        fields = {"http.method": "POST", "http.path": "/generate",
+                  "http.response.status_code": 200,
+                  "duration.ms": round(duration * 1000, 2),
+                  "request.id": request_id,
+                  "qr.kind": kind,
+                  "text.length": len(text)}
+        if delay:
+            fields["fault.delay_ms"] = delay
+        log_event("INFO", "QR code generated successfully", **fields)
 
         return send_file(buf, mimetype="image/png")
 
