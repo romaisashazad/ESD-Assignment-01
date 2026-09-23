@@ -24,6 +24,7 @@ logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 logger.propagate = False
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 def log_event(level, message, **fields):
     entry = {
