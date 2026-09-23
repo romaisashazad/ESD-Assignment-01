@@ -1,4 +1,5 @@
-from flask import Flask, request, send_file, jsonify, Response
+from flask import Flask, request, send_file, jsonify, Response, g
+import uuid
 import qrcode
 import io
 import time
@@ -8,6 +9,14 @@ import sys
 from prometheus_client import Counter, Gauge, Histogram, Summary, generate_latest, CONTENT_TYPE_LATEST
 
 app = Flask(__name__)
+@app.before_request
+def assign_request_id():
+    g.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
+@app.after_request
+def return_request_id(resp):
+    resp.headers["X-Request-ID"] = g.request_id
+    return resp
 
 # --- Structured JSON logger ---
 logger = logging.getLogger("qr-service")
@@ -70,7 +79,7 @@ def metrics():
 def generate():
     data = request.get_json(silent=True) or {}
     text = data.get("text")
-    request_id = request.headers.get("X-Request-ID", "n/a")
+    request_id = g.request_id
 
     if not text:
         qr_generation_errors_total.labels(reason="missing_text").inc()
