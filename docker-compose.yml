@@ -68,6 +68,7 @@ services:
       - ./telemetry/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - filebeat-data:/usr/share/filebeat/data
     depends_on:
       - elasticsearch
       - qr-service
@@ -75,3 +76,4 @@ services:
     
 volumes:
   esdata:
+  filebeat-data:
