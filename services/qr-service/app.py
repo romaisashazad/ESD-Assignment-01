@@ -7,6 +7,7 @@ import logging
 import sys
 import uuid
 import threading
+import os
 from prometheus_client import Counter, Gauge, Histogram, Summary, generate_latest, CONTENT_TYPE_LATEST
 
 app = Flask(__name__)
@@ -134,6 +135,41 @@ def injected_delay_ms():
         if n > 0 and delay > 0 and generate_calls % n == 0:
             return delay
     return 0
+
+
+# --- Part E.2: cardinality experiment ---
+# DEMO_REQUEST_ID_LABEL=true  -> demo_requests_total gets a request_id label,
+#                                so every request creates a NEW time series.
+# DEMO_REQUEST_ID_LABEL=false -> the same counter with no labels: one series.
+# Capped at 100 unique IDs so the experiment can never grow out of control.
+DEMO_LABELLED = os.environ.get("DEMO_REQUEST_ID_LABEL", "false").lower() == "true"
+DEMO_MAX_IDS = 100
+demo_ids_seen = set()
+
+if DEMO_LABELLED:
+    demo_requests_total = Counter(
+        "demo_requests_total",
+        "Cardinality demo counter, labelled by request_id (BAD practice)",
+        ["request_id"]
+    )
+else:
+    demo_requests_total = Counter(
+        "demo_requests_total",
+        "Cardinality demo counter, no labels (good practice)"
+    )
+
+
+@app.route("/demo", methods=["POST"])
+def demo():
+    if DEMO_LABELLED:
+        with fault_lock:
+            if g.request_id not in demo_ids_seen and len(demo_ids_seen) >= DEMO_MAX_IDS:
+                return jsonify({"error": "cap of 100 unique IDs reached"}), 429
+            demo_ids_seen.add(g.request_id)
+        demo_requests_total.labels(request_id=g.request_id).inc()
+    else:
+        demo_requests_total.inc()
+    return jsonify({"labelled": DEMO_LABELLED, "request_id": g.request_id}), 200
 
 
 @app.route("/health", methods=["GET"])
