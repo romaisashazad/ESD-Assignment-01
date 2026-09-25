@@ -1,6 +1,6 @@
 # QR Service with Observability (ESD Assignment 1)
 
-A Flask API that turns text or a URL into a QR code PNG, with Prometheus metrics, structured JSON logs, and a monitoring stack: Prometheus, Grafana, Node Exporter, Filebeat, Elasticsearch and Kibana. The full write-up is in `REPORT.md`.
+A Flask API that turns text or a URL into a QR code PNG, with Prometheus metrics, structured JSON logs, and a monitoring stack: Prometheus, Grafana, Node Exporter, Filebeat, Elasticsearch and Kibana. The full write-up is in `REPORT.pdf`.
 
 ## Requirements
 
