@@ -301,6 +301,17 @@ def create_qr_code():
         resp.headers["Idempotent-Replayed"] = "true"
     return resp
 
+@app.route("/v1/qr-codes/<qr_id>", methods=["GET"])
+def get_qr_code(qr_id):
+    try:
+        record = qrcore.get_qr(qr_id)
+    except qrcore.ServiceError as e:
+        return service_error_response(e)
+    resp = send_file(io.BytesIO(record.png), mimetype="image/png")
+    # A stored code never changes, so clients and caches may keep it.
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
 @app.route("/generate", methods=["POST"])
 def generate():
     data = request.get_json(silent=True) or {}
