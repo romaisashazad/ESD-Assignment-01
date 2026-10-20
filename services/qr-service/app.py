@@ -174,6 +174,8 @@ def admin_fault():
             fault["every_n"] = max(0, int(data.get("every_n", 0)))
             fault["delay_ms"] = max(0, int(data.get("delay_ms", 0)))
             active = fault["every_n"] > 0 and fault["delay_ms"] > 0
+            global generate_calls
+            generate_calls = 0  # restart the "every Nth" count so experiments are repeatable
         qr_fault_injection_active.set(1 if active else 0)
         log_event("WARN" if active else "INFO",
                   "Fault injection switched " + ("ON" if active else "OFF"),
@@ -221,7 +223,7 @@ def demo():
     if DEMO_LABELLED:
         with fault_lock:
             if g.request_id not in demo_ids_seen and len(demo_ids_seen) >= DEMO_MAX_IDS:
-                return jsonify({"error": "cap of 100 unique IDs reached"}), 429
+                return error_response(429, "demo_cap_reached", "cap of 100 unique IDs reached")
             demo_ids_seen.add(g.request_id)
         demo_requests_total.labels(request_id=g.request_id).inc()
     else:
