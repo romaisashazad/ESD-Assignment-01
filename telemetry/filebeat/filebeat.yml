@@ -12,8 +12,11 @@ filebeat.inputs:
       - drop_event:
           when:
             not:
-              equals:
-                container.name: "qr-service"
+              or:
+                - equals:
+                    container.name: "qr-service"
+                - equals:
+                    container.name: "qr-grpc-service"
 
 output.elasticsearch:
   hosts: ["http://elasticsearch:9200"]
