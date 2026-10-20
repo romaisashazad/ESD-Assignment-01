@@ -238,6 +238,68 @@ def health():
 def metrics():
     return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
+# --- A2: QR codes as resources ---
+def timed_create(text, key):
+    """Run the shared create logic with the A1 metrics around it."""
+    delay = {"ms": 0}
+
+    def hook():
+        # Inside the timed section, so the Part E fault delay still shows up in the histogram.
+        delay["ms"] = injected_delay_ms()
+        if delay["ms"]:
+            time.sleep(delay["ms"] / 1000)
+
+    qr_in_progress.inc()
+    start = time.time()
+    try:
+        record, created = qrcore.create_qr(text, key, on_render=hook)
+    finally:
+        qr_in_progress.dec()
+    duration = time.time() - start
+    if created:
+        qr_generation_duration_seconds.observe(duration)
+        qr_generation_duration_summary.observe(duration)
+        qr_generated_total.labels(kind=record.kind).inc()
+    return record, created, duration, delay["ms"]
+
+
+def read_text_from_body():
+    if not request.is_json:
+        return None, error_response(415, "unsupported_media_type",
+                                    "Send the body as JSON with Content-Type: application/json.")
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        qr_generation_errors_total.labels(reason="invalid_json").inc()
+        return None, error_response(400, "invalid_json", "The body must be a JSON object.")
+    return data.get("text"), None
+
+
+@app.route("/v1/qr-codes", methods=["POST"])
+def create_qr_code():
+    text, err = read_text_from_body()
+    if err:
+        return err
+    try:
+        record, created, duration, delay = timed_create(text, request.headers.get("Idempotency-Key"))
+    except qrcore.ServiceError as e:
+        return service_error_response(e)
+
+    fields = {"http.method": "POST", "http.path": "/v1/qr-codes",
+              "http.response.status_code": 201, "duration.ms": round(duration * 1000, 2),
+              "request.id": g.request_id, "qr.kind": record.kind, "qr.id": record.id,
+              "text.length": record.text_length, "idempotent.replay": not created}
+    if delay:
+        fields["fault.delay_ms"] = delay
+    log_event("INFO", "QR code created" if created else "QR code returned (idempotent replay)",
+              **fields)
+
+    resp = jsonify({"id": record.id, "kind": record.kind, "text_length": record.text_length,
+                    "created_at": record.created_at, "image_url": f"/v1/qr-codes/{record.id}"})
+    resp.status_code = 201
+    resp.headers["Location"] = f"/v1/qr-codes/{record.id}"
+    if not created:
+        resp.headers["Idempotent-Replayed"] = "true"
+    return resp
 
 @app.route("/generate", methods=["POST"])
 def generate():
