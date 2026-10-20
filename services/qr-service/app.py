@@ -9,10 +9,15 @@ import uuid
 import threading
 import os
 from prometheus_client import Counter, Gauge, Histogram, Summary, generate_latest, CONTENT_TYPE_LATEST
+import math
+from collections import deque
+from werkzeug.exceptions import HTTPException
+
+from common import qrcore
 
 app = Flask(__name__)
 
-
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024  # bodies over 16 KB get a 413 error
 # --- Request IDs (Fix 1) ---
 # Use the client's X-Request-ID if it sent one, otherwise generate a new one.
 # The ID is returned in the response header so the client can quote it.
@@ -20,10 +25,13 @@ app = Flask(__name__)
 def assign_request_id():
     g.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
 
-
 @app.after_request
-def return_request_id(resp):
+def after(resp):
     resp.headers["X-Request-ID"] = g.request_id
+    if request.path != "/metrics":
+        route = request.url_rule.rule if request.url_rule else "unmatched"
+        http_requests_total.labels(method=request.method, route=route,
+                                   status=str(resp.status_code)).inc()
     return resp
 
 
@@ -94,8 +102,56 @@ qr_fault_injection_active = Gauge(
 # show "No data" instead of 0.
 for k in ("url", "text"):
     qr_generated_total.labels(kind=k)
-for r in ("missing_text", "internal_error"):
+for r in qrcore.ERROR_CODES + ("internal_error",):
     qr_generation_errors_total.labels(reason=r)
+# A2: every HTTP response by method, route template and status (bounded labels).
+http_requests_total = Counter("http_requests_total", "HTTP responses by method, route and status",
+                              ["method", "route", "status"])
+# A2: requests refused by the rate limiter (these never reach the generation code).
+qr_rate_limited_total = Counter("qr_rate_limited_total", "Requests rejected with 429")
+
+# --- Errors: one format everywhere ---
+STATUS = {"invalid": 400, "conflict": 422, "not_found": 404}
+
+
+def error_response(status, code, message, headers=None):
+    body = {"error": {"code": code, "message": message, "request_id": g.request_id}}
+    resp = jsonify(body)
+    resp.status_code = status
+    for k, v in (headers or {}).items():
+        resp.headers[k] = v
+    return resp
+
+
+def service_error_response(e):
+    qr_generation_errors_total.labels(reason=e.code).inc()
+    status = STATUS[e.category]
+    log_event("ERROR", f"Request rejected: {e.code}",
+              **{"http.method": request.method, "http.path": request.path,
+                 "http.response.status_code": status, "error.code": e.code,
+                 "request.id": g.request_id})
+    return error_response(status, e.code, e.message)
+
+
+HTTP_CODES = {404: "not_found", 405: "method_not_allowed", 413: "payload_too_large",
+              415: "unsupported_media_type"}
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(e):
+    code = HTTP_CODES.get(e.code, "http_error")
+    extra = {k: v for k, v in e.get_headers() if k == "Allow"}
+    return error_response(e.code, code, e.description, extra)
+
+
+@app.errorhandler(Exception)
+def handle_unexpected(e):
+    qr_generation_errors_total.labels(reason="internal_error").inc()
+    log_event("ERROR", "Unhandled error", **{"http.path": request.path,
+              "http.response.status_code": 500, "error.message": str(e),
+              "request.id": g.request_id})
+    return error_response(500, "internal_error", "Something went wrong on our side.")
+
 
 
 # --- Part E: fault injection ---
@@ -107,6 +163,7 @@ for r in ("missing_text", "internal_error"):
 fault = {"every_n": 0, "delay_ms": 0}
 fault_lock = threading.Lock()
 generate_calls = 0
+
 
 
 @app.route("/admin/fault", methods=["GET", "POST"])
