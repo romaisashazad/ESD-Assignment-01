@@ -237,6 +237,24 @@ def health():
 @app.route("/metrics", methods=["GET"])
 def metrics():
     return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+# --- A2: rate limiter (sliding window, in memory, per client IP) ---
+RATE_LIMIT_MAX = int(os.environ.get("RATE_LIMIT_MAX", "30"))
+RATE_LIMIT_WINDOW = float(os.environ.get("RATE_LIMIT_WINDOW", "10"))
+_hits = {}
+_hits_lock = threading.Lock()
+
+
+def rate_limit_retry_after(ip):
+    """Return None if the call is allowed, else the seconds until the next call is allowed."""
+    now = time.monotonic()
+    with _hits_lock:
+        q = _hits.setdefault(ip, deque())
+        while q and q[0] <= now - RATE_LIMIT_WINDOW:
+            q.popleft()
+        if len(q) >= RATE_LIMIT_MAX:
+            return max(1, math.ceil(q[0] + RATE_LIMIT_WINDOW - now))
+        q.append(now)
+        return None
 
 # --- A2: QR codes as resources ---
 def timed_create(text, key):
@@ -276,6 +294,16 @@ def read_text_from_body():
 
 @app.route("/v1/qr-codes", methods=["POST"])
 def create_qr_code():
+    retry_after = rate_limit_retry_after(request.remote_addr)
+    if retry_after is not None:
+        qr_rate_limited_total.inc()
+        log_event("WARN", "Rate limit exceeded",
+                  **{"http.method": "POST", "http.path": "/v1/qr-codes",
+                     "http.response.status_code": 429, "retry_after.s": retry_after,
+                     "request.id": g.request_id})
+        return error_response(429, "rate_limited",
+                              f"Too many requests. Try again in {retry_after} s.",
+                              {"Retry-After": str(retry_after)})
     text, err = read_text_from_body()
     if err:
         return err
