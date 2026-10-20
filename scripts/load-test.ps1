@@ -4,7 +4,7 @@
 param(
     [int]$Minutes = 6,
     [double]$IntervalSeconds = 0.5,
-    [string]$Url = "http://localhost:5000/generate"
+    [string]$Url = "http://localhost:5000/v1/qr-codes"
 )
 
 $start = Get-Date

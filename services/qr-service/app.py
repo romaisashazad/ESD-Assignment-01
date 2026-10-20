@@ -340,71 +340,39 @@ def get_qr_code(qr_id):
     resp.headers["Cache-Control"] = "public, max-age=3600"
     return resp
 
+# --- Old endpoint, kept so existing callers still work ---
 @app.route("/generate", methods=["POST"])
 def generate():
-    data = request.get_json(silent=True) or {}
-    text = data.get("text")
-    request_id = g.request_id
-
-    if not text:
-        qr_generation_errors_total.labels(reason="missing_text").inc()
-        log_event(
-            "ERROR", "QR generation failed: missing text field",
-            **{"http.method": "POST", "http.path": "/generate",
-               "http.response.status_code": 400, "request.id": request_id}
-        )
-        return jsonify({"error": "Missing 'text' field"}), 400
-
-    qr_in_progress.inc()
-    start = time.time()
-
+    """Deprecated: use POST /v1/qr-codes. Same rules, but nothing is stored."""
+    text, err = read_text_from_body()
+    if err:
+        return err
     try:
-        img = qrcode.make(text)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-
-        # Part E: the delay sits inside the timed section, so it shows up in
-        # the histogram, the summary and the log's duration.ms, just like a
-        # real slowdown would.
-        delay = injected_delay_ms()
-        if delay:
-            time.sleep(delay / 1000)
-
+        qrcore.validate_text(text)
+        qr_in_progress.inc()
+        start = time.time()
+        try:
+            png = qrcore.render_png(text)
+            delay = injected_delay_ms()
+            if delay:
+                time.sleep(delay / 1000)
+        finally:
+            qr_in_progress.dec()
         duration = time.time() - start
         qr_generation_duration_seconds.observe(duration)
         qr_generation_duration_summary.observe(duration)
-
-        kind = "url" if text.lower().startswith(("http://", "https://")) else "text"
+        kind = qrcore.kind_of(text)
         qr_generated_total.labels(kind=kind).inc()
-
-        # Only the length and kind of the text are logged, never the text itself,
-        # so no user content ends up in the logs.
-        fields = {"http.method": "POST", "http.path": "/generate",
-                  "http.response.status_code": 200,
-                  "duration.ms": round(duration * 1000, 2),
-                  "request.id": request_id,
-                  "qr.kind": kind,
-                  "text.length": len(text)}
-        if delay:
-            fields["fault.delay_ms"] = delay
-        log_event("INFO", "QR code generated successfully", **fields)
-
-        return send_file(buf, mimetype="image/png")
-
-    except Exception as e:
-        qr_generation_errors_total.labels(reason="internal_error").inc()
-        log_event(
-            "ERROR", "QR generation failed: internal error",
-            **{"http.method": "POST", "http.path": "/generate",
-               "http.response.status_code": 500,
-               "error.message": str(e), "request.id": request_id}
-        )
-        return jsonify({"error": str(e)}), 500
-
-    finally:
-        qr_in_progress.dec()
-
+    except qrcore.ServiceError as e:
+        return service_error_response(e)
+    log_event("INFO", "QR code generated successfully",
+              **{"http.method": "POST", "http.path": "/generate",
+                 "http.response.status_code": 200, "duration.ms": round(duration * 1000, 2),
+                 "request.id": g.request_id, "qr.kind": kind, "text.length": len(text)})
+    resp = send_file(io.BytesIO(png), mimetype="image/png")
+    resp.headers["Deprecation"] = "true"
+    resp.headers["Link"] = '</v1/qr-codes>; rel="successor-version"'
+    return resp
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
