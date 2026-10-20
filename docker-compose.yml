@@ -1,10 +1,15 @@
 services:  
   qr-service:
-    build: ./services/qr-service
+    build:
+      context: ./services
+      dockerfile: qr-service/Dockerfile
     container_name: qr-service
     ports:
       - "5000:5000"
     restart: unless-stopped
+    volumes:
+      - qr-data:/data
+
     labels:
       - "co.elastic.logs/enabled=true"
     logging:
@@ -28,6 +33,7 @@ services:
     ports:
       - "9090:9090"
     restart: unless-stopped
+    
   
   grafana:
     image: grafana/grafana:latest
@@ -95,3 +101,4 @@ volumes:
   filebeat-data:
   grafana-data:
   prometheus-data:
+  qr-data:
