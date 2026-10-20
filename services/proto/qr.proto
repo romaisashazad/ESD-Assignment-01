@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package qr.v1;
+
+// Same operation as POST /v1/qr-codes, same business rules, same stored data.
+service QRService {
+  rpc CreateQrCode(CreateQrCodeRequest) returns (CreateQrCodeResponse);
+}
+
+message CreateQrCodeRequest {
+  string text = 1;
+  string idempotency_key = 2;  // optional, same meaning as the HTTP Idempotency-Key header
+}
+
+message CreateQrCodeResponse {
+  string id = 1;
+  string kind = 2;          // "url" or "text"
+  int32 text_length = 3;
+  string created_at = 4;
+  string image_url = 5;     // fetch the PNG with GET <image_url> on the HTTP service
+  bool replayed = 6;        // true when an idempotency key matched an earlier call
+}
