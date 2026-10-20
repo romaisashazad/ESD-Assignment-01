@@ -1,0 +1,130 @@
+openapi: 3.0.3
+info:
+  title: QR Code Service
+  version: 2.0.0
+  description: Create QR codes from text or URLs and fetch the stored PNG.
+servers:
+  - url: http://localhost:5000
+paths:
+  /v1/qr-codes:
+    post:
+      operationId: createQrCode
+      summary: Create a QR code
+      description: >
+        Renders and stores a QR code. Send an Idempotency-Key so a retry returns the
+        same code instead of making a second one. Limited to 30 requests per 10 s per client IP.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: {type: string, maxLength: 64, pattern: '^[A-Za-z0-9._:-]+$'}
+        - name: X-Request-ID
+          in: header
+          required: false
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRequest'}
+            example: {text: "https://example.com"}
+      responses:
+        '201':
+          description: Created (also returned for an idempotent replay, with Idempotent-Replayed true)
+          headers:
+            Location: {schema: {type: string}, description: URL of the new QR code}
+            Idempotent-Replayed: {schema: {type: string, enum: ["true"]}}
+            X-Request-ID: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QrCode'}
+        '400': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429':
+          description: Rate limit exceeded
+          headers:
+            Retry-After: {schema: {type: integer}, description: Seconds until the next call is allowed}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /v1/qr-codes/{id}:
+    get:
+      operationId: getQrCode
+      summary: Download a QR code as PNG
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: The PNG image
+          headers:
+            Cache-Control: {schema: {type: string}, description: "public, max-age=3600"}
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+        '404': {$ref: '#/components/responses/Error'}
+  /generate:
+    post:
+      deprecated: true
+      operationId: generateQrCode
+      summary: Deprecated. Returns a PNG directly and stores nothing. Use POST /v1/qr-codes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRequest'}
+      responses:
+        '200':
+          description: The PNG image
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+  /health:
+    get:
+      summary: Liveness check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {status: {type: string, example: ok}}
+components:
+  responses:
+    Error:
+      description: Error in the standard format
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    CreateRequest:
+      type: object
+      required: [text]
+      properties:
+        text: {type: string, minLength: 1, maxLength: 1000}
+    QrCode:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, enum: [url, text]}
+        text_length: {type: integer}
+        created_at: {type: string, format: date-time}
+        image_url: {type: string, example: /v1/qr-codes/0b6f...}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: {type: string, example: missing_text}
+            message: {type: string}
+            request_id: {type: string}
