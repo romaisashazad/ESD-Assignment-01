@@ -108,6 +108,10 @@ for r in qrcore.ERROR_CODES + ("internal_error",):
 # A2: every HTTP response by method, route template and status (bounded labels).
 http_requests_total = Counter("http_requests_total", "HTTP responses by method, route and status",
                               ["method", "route", "status"])
+# A2: repeated requests answered from storage because the Idempotency-Key matched.
+qr_idempotent_replays_total = Counter(
+    "qr_idempotent_replays_total",
+    "Requests answered from storage because the Idempotency-Key was already used")
 # A2: requests refused by the rate limiter (these never reach the generation code).
 qr_rate_limited_total = Counter("qr_rate_limited_total", "Requests rejected with 429")
 
@@ -281,6 +285,8 @@ def timed_create(text, key):
         qr_generation_duration_seconds.observe(duration)
         qr_generation_duration_summary.observe(duration)
         qr_generated_total.labels(kind=record.kind).inc()
+    else:
+        qr_idempotent_replays_total.inc()
     return record, created, duration, delay["ms"]
 
 
