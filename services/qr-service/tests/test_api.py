@@ -129,3 +129,15 @@ def test_legacy_generate_still_works_and_is_deprecated(client):
     r = client.post("/generate", json={"text": "hi"})
     assert r.status_code == 200 and r.data.startswith(PNG) and r.headers["Deprecation"] == "true"
     assert client.post("/generate", json={}).status_code == 400
+
+def test_responses_match_openapi_schemas(client):
+    """Check real responses against the schemas in openapi/openapi.yaml."""
+    import jsonschema
+    import yaml
+    spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "openapi", "openapi.yaml")
+    schemas = yaml.safe_load(open(spec_path))["components"]["schemas"]
+
+    for name, resp in (("QrCode", client.post("/v1/qr-codes", json={"text": "spec check"})),
+                       ("Error", client.post("/v1/qr-codes", json={})),
+                       ("Error", client.get("/v1/qr-codes/nope"))):
+        jsonschema.validate(resp.json, schemas[name])
